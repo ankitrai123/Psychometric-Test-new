@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch } from 'react';
-import { API_URL, submitAssessment } from '../api';
+import { API_URL, SubmitError, submitAssessment } from '../api';
 import { Check, Download } from '../components/Icons';
-import { candidate } from '../data/candidate';
+import { candidate, inviteState } from '../data/candidate';
 import { questions, test } from '../data/test';
 import type { SessionAction, SessionState } from '../hooks/useSession';
 
@@ -35,13 +35,14 @@ interface Props {
   dispatch: Dispatch<SessionAction>;
 }
 
-type SyncStatus = 'offline' | 'sending' | 'sent' | 'failed';
+type SyncStatus = 'offline' | 'sending' | 'sent' | 'failed' | 'rejected';
 
 export function CompletionPage({ state, dispatch }: Props) {
   const attempted = Object.keys(state.answers).length;
   const [sync, setSync] = useState<SyncStatus>(
     !API_URL ? 'offline' : state.serverAssessmentId ? 'sent' : 'sending',
   );
+  const [rejection, setRejection] = useState('');
   const inFlight = useRef(false);
 
   const send = useCallback(async () => {
@@ -52,8 +53,17 @@ export function CompletionPage({ state, dispatch }: Props) {
       const assessmentId = await submitAssessment(state);
       dispatch({ type: 'serverAccepted', assessmentId });
       setSync('sent');
-    } catch {
-      setSync('failed');
+    } catch (err) {
+      if (err instanceof SubmitError && err.code === 'completed') {
+        // An earlier attempt reached the server even though we never saw the reply.
+        dispatch({ type: 'serverAccepted', assessmentId: 'already-submitted' });
+        setSync('sent');
+      } else if (err instanceof SubmitError) {
+        setRejection(err.message);
+        setSync('rejected');
+      } else {
+        setSync('failed');
+      }
     } finally {
       inFlight.current = false;
     }
@@ -100,14 +110,17 @@ export function CompletionPage({ state, dispatch }: Props) {
             <button className="link-btn" onClick={() => void send()}>Retry</button>
           </p>
         )}
+        {sync === 'rejected' && <p className="sync-note error-text">{rejection}</p>}
         <p className="muted">The recruitment team will contact you about next steps.</p>
         <div className="complete-actions">
           <button className="btn btn-outline" onClick={download}>
             <Download size={16} /> Download responses (JSON)
           </button>
-          <button className="btn btn-ghost" onClick={() => dispatch({ type: 'reset' })}>
-            Start over (demo)
-          </button>
+          {!inviteState.token && (
+            <button className="btn btn-ghost" onClick={() => dispatch({ type: 'reset' })}>
+              Start over (demo)
+            </button>
+          )}
         </div>
       </section>
     </main>
