@@ -140,19 +140,40 @@
                border-radius: 6px; color: var(--text-primary); text-decoration: none; font-weight: 600; white-space: nowrap; }
   a.btn-link:hover { border-color: #2563eb; color: #2563eb; }
   button.copied { background: #13751f; }
+  .who { display: flex; gap: 10px; align-items: center; font-size: 13px; color: var(--text-secondary); flex-wrap: wrap; }
+  .who b { color: var(--text-primary); }
+  .login { min-height: calc(100vh - 70px); display: grid; place-items: center; padding: 24px 16px; }
+  .login-card { width: min(380px, 100%); background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+                padding: 28px 24px; display: grid; gap: 14px; }
+  .login-card h2 { font-size: 18px; margin: 0; }
+  .login-card p { margin: 0; }
+  .login-card label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; font-weight: 600; color: var(--text-secondary); }
+  .login-card input { width: 100%; max-width: none; height: 40px; }
+  .login-card button { height: 40px; }
   #tip { position: fixed; pointer-events: none; background: var(--tip-bg); color: var(--tip-text); font-size: 12px;
          padding: 6px 9px; border-radius: 6px; opacity: 0; transition: opacity .1s; z-index: 10; white-space: nowrap; }
 </style>
 </head>
 <body>
 <header>
-  <h1>Assessment analytics</h1>
-  <form class="auth" id="auth">
-    <input id="key" type="password" placeholder="Dashboard admin key" autocomplete="off" aria-label="Dashboard admin key" />
-    <button type="submit">Load</button>
-  </form>
+  <h1>Assessment admin</h1>
+  <div class="who">
+    <span class="pill warn hidden" id="auth-off" title="Set ADMIN_PASSWORD on the server to require a sign-in">Login is off: anyone with this address can open the dashboard</span>
+    <span id="who-name" class="hidden"></span>
+    <button type="button" class="secondary small hidden" id="sign-out">Sign out</button>
+  </div>
 </header>
-<main>
+<section class="login hidden" id="login-screen">
+  <form class="login-card" id="login-form" autocomplete="on">
+    <h2>Admin sign in</h2>
+    <p class="note">Sign in to manage candidate invitations and view results.</p>
+    <label>Username <input id="login-user" name="username" autocomplete="username" required maxlength="200" /></label>
+    <label>Password <input id="login-pass" name="password" type="password" autocomplete="current-password" required maxlength="500" /></label>
+    <button type="submit" id="login-btn">Sign in</button>
+    <p class="note error" id="login-msg" role="alert"></p>
+  </form>
+</section>
+<main id="dashboard" class="hidden">
   <p id="status" class="note">Loading…</p>
 
   <section class="card" id="invite-card">
@@ -303,8 +324,8 @@
   const $ = (id) => document.getElementById(id);
   const tip = $("tip");
   const store = {
-    get() { try { return sessionStorage.getItem("adminKey") || ""; } catch { return ""; } },
-    set(v) { try { sessionStorage.setItem("adminKey", v); } catch {} },
+    get() { try { return sessionStorage.getItem("adminToken") || ""; } catch { return ""; } },
+    set(v) { try { v ? sessionStorage.setItem("adminToken", v) : sessionStorage.removeItem("adminToken"); } catch {} },
   };
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
@@ -383,10 +404,14 @@
 
   // ---- API helper -----------------------------------------------------------
   async function api(path, opts = {}) {
-    const key = $("key").value || store.get();
-    const headers = { ...(opts.body ? { "Content-Type": "application/json" } : {}), ...(key ? { "X-API-Key": key } : {}) };
+    const token = store.get();
+    const headers = { ...(opts.body ? { "Content-Type": "application/json" } : {}),
+                      ...(token ? { Authorization: `Bearer ${token}` } : {}) };
     const res = await fetch(path, { ...opts, headers });
-    if (res.status === 401) throw new Error("Enter a valid dashboard admin key.");
+    if (res.status === 401) {
+      showLogin("Your session has ended. Please sign in again.");
+      const err = new Error("Please sign in."); err.auth = true; throw err;
+    }
     if (!res.ok) {
       let detail = `Request failed (${res.status}).`;
       try { const j = await res.json(); if (j.detail) detail = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail); } catch {}
@@ -558,9 +583,9 @@
         a.href = URL.createObjectURL(blob); a.download = `assessment_${btn.dataset.name}.pdf`; a.click();
         setTimeout(() => URL.revokeObjectURL(a.href), 1000);
       }
-    } catch (err) { alert(err.message); }
+    } catch (err) { if (!err.auth) alert(err.message); }
   });
-  $("cand-refresh").addEventListener("click", () => loadCandidates().catch((err) => alert(err.message)));
+  $("cand-refresh").addEventListener("click", () => loadCandidates().catch((err) => { if (!err.auth) alert(err.message); }));
 
   // ---- Candidate invitations -------------------------------------------------
   const INV_TAGS = { invited: ["", "Invited"], started: ["info", "Started"], completed: ["ok", "Completed"],
@@ -688,15 +713,63 @@
   async function refreshAnalytics() { render(await (await api("/api/analytics")).json()); }
 
   async function load() {
-    $("key").value = $("key").value || store.get();
     try {
       await Promise.all([refreshAnalytics(), loadProvider(), loadCandidates(), loadInvites()]);
     } catch (err) {
+      if (err.auth) return;
       $("status").textContent = err.message; $("status").className = "note error";
     }
   }
-  $("auth").addEventListener("submit", (e) => { e.preventDefault(); store.set($("key").value); load(); });
-  load();
+
+  // ---- Sign in ----------------------------------------------------------------
+  function showLogin(message = "") {
+    $("dashboard").classList.add("hidden");
+    $("login-screen").classList.remove("hidden");
+    ["who-name", "sign-out"].forEach((id) => $(id).classList.add("hidden"));
+    $("login-msg").textContent = message;
+    $("login-user").focus();
+  }
+
+  function showDashboard(session) {
+    $("login-screen").classList.add("hidden");
+    $("dashboard").classList.remove("hidden");
+    $("auth-off").classList.toggle("hidden", session.auth_required);
+    if (session.auth_required) {
+      $("who-name").innerHTML = `Signed in as <b>${esc(session.username)}</b>`;
+      ["who-name", "sign-out"].forEach((id) => $(id).classList.remove("hidden"));
+    }
+    load();
+  }
+
+  $("login-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    busy($("login-btn"), "Signing in…", async () => {
+      $("login-msg").textContent = "";
+      try {
+        const res = await fetch("/api/admin/login", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: $("login-user").value, password: $("login-pass").value }) });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Sign-in failed. Please try again.");
+        store.set(data.token || ""); $("login-pass").value = "";
+        showDashboard({ auth_required: data.auth_required, username: data.username });
+      } catch (err) { $("login-msg").textContent = err.message; $("login-pass").select(); }
+    });
+  });
+
+  $("sign-out").addEventListener("click", () => { store.set(""); showLogin("You have signed out."); });
+
+  async function boot() {
+    try {
+      const token = store.get();
+      const res = await fetch("/api/admin/session", token ? { headers: { Authorization: `Bearer ${token}` } } : {});
+      const session = await res.json();
+      if (session.signed_in) showDashboard(session);
+      else { store.set(""); showLogin(); }
+    } catch {
+      showLogin("Couldn't reach the server. Please refresh the page.");
+    }
+  }
+  boot();
 </script>
 </body>
 </html>
