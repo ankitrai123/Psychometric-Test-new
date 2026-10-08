@@ -96,6 +96,8 @@ Admins create a personal test link for each candidate from the **Invite a candid
 - The Invitations table shows Invited, Started, Completed, Expired or Cancelled, with **Copy link**, **Cancel link** and **View report**.
 - Set `REQUIRE_INVITE=true` on the backend so the test can only be taken through a personal link (the site then shows "Personal test link required" without one). Links point to `CANDIDATE_APP_URL` (defaults to the first non-localhost `CORS_ORIGINS` entry).
 
+The admin dashboard asks for a username and password once `ADMIN_PASSWORD` is set on the backend (`ADMIN_USERNAME` defaults to `admin`). Sessions last 12 hours; changing the password signs everyone out.
+
 Invites are stored in the backend database, so on serverless hosting (Vercel) connect a shared Postgres database via `DATABASE_URL`.
 
 ## Not yet included
