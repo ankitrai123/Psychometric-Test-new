@@ -468,6 +468,102 @@ def test_admin_endpoints_require_api_key(cfg):
     assert client.get("/api/analytics", headers={"X-API-Key": "admin-secret"}).status_code == 200
 
 
+# ---------------------------------------------------------------------------
+# Candidate invitations
+# ---------------------------------------------------------------------------
+
+
+def test_invite_lifecycle(cfg):
+    cfg = dataclasses.replace(cfg, candidate_app_url="https://tests.example.com/")
+    client = api_client(cfg)
+
+    res = client.post("/api/admin/invites", json={"name": "Ananya Sharma", "email": "ananya@example.com",
+                                                  "role": "Data Analyst", "valid_days": 3})
+    assert res.status_code == 201, res.text
+    invite = res.json()
+    token = invite["token"]
+    assert invite["status"] == "invited" and invite["candidate_id"].startswith("CND-")
+    assert invite["link"] == f"https://tests.example.com/?invite={token}"
+
+    # Candidate opens the link: public details only, status moves to started.
+    opened = client.get(f"/api/invites/{token}").json()
+    assert opened["name"] == "Ananya Sharma" and opened["role"] == "Data Analyst" and opened["status"] == "started"
+    assert "token" not in opened and "assessment_id" not in opened
+    assert client.get("/api/invites/not-a-token").json()["detail"]["code"] == "invalid"
+
+    # Submission takes identity from the invite, not the request body.
+    body = assess_body(10, invite_token=token, test_taker_id="spoofed", name="Someone Else")
+    report = client.post("/api/assess", json=body)
+    assert report.status_code == 200, report.text
+    aid = report.json()["assessment_id"]
+    stored = client.get(f"/api/results/{aid}").json()
+    assert stored["name"] == "Ananya Sharma"
+    assert client.get(f"/api/results/{invite['candidate_id']}").json()["assessment_id"] == aid
+
+    # Single use.
+    again = client.post("/api/assess", json=body)
+    assert again.status_code == 409 and again.json()["detail"]["code"] == "completed"
+    listed = client.get("/api/admin/invites").json()
+    assert listed["invites"][0]["status"] == "completed" and listed["invites"][0]["assessment_id"] == aid
+    assert client.get(f"/api/invites/{token}").json()["status"] == "completed"
+
+
+def test_invalid_answers_do_not_use_up_invite(cfg):
+    client = api_client(cfg)
+    token = client.post("/api/admin/invites", json={"name": "Ravi"}).json()["token"]
+    bad = assess_body(11, invite_token=token)
+    bad["responses"]["1"] = 9
+    assert client.post("/api/assess", json=bad).status_code == 422
+    assert client.post("/api/assess", json=assess_body(11, invite_token=token)).status_code == 200
+
+
+def test_revoked_and_expired_invites(cfg):
+    client = api_client(cfg)
+    token = client.post("/api/admin/invites", json={"name": "Meera", "candidate_id": "EMP-42"}).json()["token"]
+    revoked = client.delete(f"/api/admin/invites/{token}").json()
+    assert revoked["status"] == "revoked"
+    res = client.post("/api/assess", json=assess_body(12, invite_token=token))
+    assert res.status_code == 410 and res.json()["detail"]["code"] == "revoked"
+    assert client.delete("/api/admin/invites/missing").status_code == 404
+
+    db = Database(cfg)
+    expired = db.create_invite(name="Old", email=None, candidate_id=None, role=None, valid_days=1)
+    from datetime import timedelta
+    from database_models import Invite, utcnow
+    with db.session() as s:
+        s.get(Invite, expired["token"]).expires_at = utcnow() - timedelta(minutes=1)
+    assert client.get(f"/api/invites/{expired['token']}").json()["status"] == "expired"
+    res = client.post("/api/assess", json=assess_body(13, invite_token=expired["token"]))
+    assert res.status_code == 410 and res.json()["detail"]["code"] == "expired"
+
+    too_long = client.post("/api/admin/invites", json={"name": "X", "valid_days": cfg.invite_max_days + 1})
+    assert too_long.status_code == 422
+
+
+def test_require_invite_and_admin_key(cfg):
+    locked = dataclasses.replace(cfg, require_invite=True, admin_api_key="admin-secret")
+    client = api_client(locked)
+    assert client.get("/health").json()["invite_required"] is True
+    res = client.post("/api/assess", json=assess_body(14))
+    assert res.status_code == 403 and res.json()["detail"]["code"] == "invite_required"
+    assert client.post("/api/admin/invites", json={"name": "No Key"}).status_code == 401
+    assert client.get("/api/admin/invites").status_code == 401
+    hdr = {"X-API-Key": "admin-secret"}
+    token = client.post("/api/admin/invites", json={"name": "Keyed"}, headers=hdr).json()["token"]
+    assert client.get(f"/api/invites/{token}").status_code == 200  # candidates need no key
+    assert client.post("/api/assess", json=assess_body(14, invite_token=token)).status_code == 200
+
+
+def test_invite_link_base_url_and_database_url():
+    from config import Settings, normalise_database_url
+    assert Settings(cors_origins=("http://localhost:5173", "https://app.example.com")).invite_base_url \
+        == "https://app.example.com"
+    assert Settings(candidate_app_url="https://x.example/").invite_base_url == "https://x.example"
+    assert normalise_database_url("postgres://u:p@h/db?sslmode=require") == "postgresql+psycopg://u:p@h/db?sslmode=require"
+    assert normalise_database_url("postgresql://u@h/db") == "postgresql+psycopg://u@h/db"
+    assert normalise_database_url("sqlite:///x.db") == "sqlite:///x.db"
+
+
 def test_responses_encrypted_at_rest(cfg):
     client = api_client(cfg)
     body = assess_body(5)

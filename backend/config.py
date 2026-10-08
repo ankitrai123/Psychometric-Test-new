@@ -101,6 +101,23 @@ class Settings:
     admin_api_key: str | None = None
     cors_origins: tuple[str, ...] = field(default_factory=lambda: ("http://localhost:5173",))
 
+    # --- Candidate invitations ---------------------------------------------
+    # When true, POST /api/assess only accepts submissions that carry a valid
+    # invite token created from the admin dashboard.
+    require_invite: bool = False
+    # Public URL of the candidate frontend, used to build invite links.
+    # Defaults to the first non-localhost CORS origin.
+    candidate_app_url: str | None = None
+    invite_default_days: int = 7
+    invite_max_days: int = 90
+
+    @property
+    def invite_base_url(self) -> str:
+        if self.candidate_app_url:
+            return self.candidate_app_url.rstrip("/")
+        public = [o for o in self.cors_origins if "localhost" not in o and "127.0.0.1" not in o]
+        return (public or list(self.cors_origins) or ["http://localhost:5173"])[0].rstrip("/")
+
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
@@ -136,6 +153,15 @@ def validate_api_key_format(key: str) -> bool:
     return key.startswith("sk-ant-") and len(key) > 20 and key.strip() == key
 
 
+def normalise_database_url(url: str) -> str:
+    """Hosted Postgres providers (Neon, Supabase, Heroku, Vercel) hand out
+    postgres:// or postgresql:// URLs; SQLAlchemy needs the driver named."""
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url[len(prefix):]
+    return url
+
+
 def load_settings() -> Settings:
     _load_dotenv(BASE_DIR / ".env")
     origins = _env("CORS_ORIGINS", "http://localhost:5173") or ""
@@ -163,10 +189,13 @@ def load_settings() -> Settings:
         llm_input_price_per_mtok=_env_float("LLM_INPUT_PRICE_PER_MTOK", 5.0),
         llm_output_price_per_mtok=_env_float("LLM_OUTPUT_PRICE_PER_MTOK", 25.0),
         cache_max_entries=_env_int("LLM_CACHE_MAX_ENTRIES", 5000),
-        database_url=_env("DATABASE_URL", f"sqlite:///{DATA_DIR / 'assessments.db'}") or "",
+        database_url=normalise_database_url(_env("DATABASE_URL", f"sqlite:///{DATA_DIR / 'assessments.db'}") or ""),
         response_encryption_key=_env("RESPONSE_ENCRYPTION_KEY"),
         admin_api_key=_env("ADMIN_API_KEY"),
         cors_origins=tuple(o.strip() for o in origins.split(",") if o.strip()),
+        require_invite=_env_bool("REQUIRE_INVITE", False),
+        candidate_app_url=_env("CANDIDATE_APP_URL"),
+        invite_default_days=_env_int("INVITE_DEFAULT_DAYS", 7),
     )
 
 

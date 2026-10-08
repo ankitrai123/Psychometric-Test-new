@@ -8,6 +8,7 @@ responses        the candidate's raw answers, Fernet-encrypted at rest,
                  plus a SHA-256 digest for integrity / duplicate checks
 results          one row per scored dimension (for analytics queries)
 llm_cache        persistent LLM generations shared across candidates
+invites          personal test links created from the admin dashboard
 
 Raw answers are only ever stored encrypted and are never logged.
 """
@@ -16,15 +17,16 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import secrets
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator, Mapping
 
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import (JSON, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, create_engine,
-                        func, select)
+                        func, select, update)
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 from config import Settings, settings as default_settings
@@ -34,6 +36,14 @@ log = logging.getLogger("assessment.db")
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def as_utc(value: datetime | None) -> datetime | None:
+    """SQLite drops tzinfo on DateTime(timezone=True) columns; treat naive
+    values as UTC so comparisons work on every backend."""
+    if value is None:
+        return None
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
 class Base(DeclarativeBase):
@@ -133,6 +143,51 @@ class LLMSettings(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class Invite(Base):
+    """A personal, single-use test link for one candidate."""
+
+    __tablename__ = "invites"
+
+    token: Mapped[str] = mapped_column(String(64), primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    role: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    assessment_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+    def status(self, now: datetime | None = None) -> str:
+        """revoked > completed > expired > started > invited"""
+        now = now or utcnow()
+        if self.revoked_at:
+            return "revoked"
+        if self.completed_at:
+            return "completed"
+        if as_utc(self.expires_at) <= now:
+            return "expired"
+        return "started" if self.opened_at else "invited"
+
+    def to_dict(self) -> dict[str, Any]:
+        iso = lambda d: as_utc(d).isoformat() if d else None  # noqa: E731
+        return {"token": self.token, "candidate_id": self.candidate_id, "name": self.name, "email": self.email,
+                "role": self.role, "status": self.status(), "created_at": iso(self.created_at),
+                "expires_at": iso(self.expires_at), "opened_at": iso(self.opened_at),
+                "completed_at": iso(self.completed_at), "revoked_at": iso(self.revoked_at),
+                "assessment_id": self.assessment_id}
+
+
+class InviteUnavailable(Exception):
+    """Raised when an invite can't be used; `reason` is its status or 'invalid'."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
 # ---------------------------------------------------------------------------
 # Encryption
 # ---------------------------------------------------------------------------
@@ -202,8 +257,11 @@ class StoredLLMSettings:
 class Database:
     def __init__(self, cfg: Settings = default_settings, url: str | None = None):
         url = url or cfg.database_url
-        connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
-        self.engine = create_engine(url, connect_args=connect_args, future=True)
+        if url.startswith("sqlite"):
+            self.engine = create_engine(url, connect_args={"check_same_thread": False}, future=True)
+        else:
+            # Hosted Postgres closes idle connections; check them before use.
+            self.engine = create_engine(url, future=True, pool_pre_ping=True, pool_recycle=300)
         self.SessionLocal = sessionmaker(self.engine, expire_on_commit=False)
         self.cipher = ResponseCipher.from_settings(cfg)
 
@@ -317,9 +375,10 @@ class Database:
         return {
             "assessments": {"total": total, "by_status": by_status, "by_quality": by_quality,
                             "premium_reports": premium,
-                            "avg_scoring_time_ms": round(avg_ms, 2) if avg_ms is not None else None},
+                            "avg_scoring_time_ms": round(float(avg_ms), 2) if avg_ms is not None else None},
             "dimensions": {
-                dim: {"n": n, "mean_sten": round(mean, 2), "min_sten": lo, "max_sten": hi,
+                # float(): Postgres returns AVG over integers as Decimal
+                dim: {"n": n, "mean_sten": round(float(mean), 2), "min_sten": lo, "max_sten": hi,
                       "levels": level_map.get(dim, {})}
                 for dim, n, mean, lo, hi in dims
             },
@@ -358,6 +417,77 @@ class Database:
             row = s.get(LLMSettings, 1)
             if row is not None:
                 s.delete(row)
+
+    # -- invites ----------------------------------------------------------------
+
+    def create_invite(self, *, name: str, email: str | None, candidate_id: str | None, role: str | None,
+                      valid_days: int) -> dict[str, Any]:
+        now = utcnow()
+        candidate_id = candidate_id or f"CND-{now.year}-{secrets.token_hex(3).upper()}"
+        invite = Invite(token=secrets.token_urlsafe(18), candidate_id=candidate_id, name=name, email=email,
+                        role=role, created_at=now, expires_at=now + timedelta(days=valid_days))
+        with self.session() as s:
+            s.add(invite)
+        return invite.to_dict()
+
+    def get_invite(self, token: str) -> dict[str, Any] | None:
+        with self.session() as s:
+            invite = s.get(Invite, token)
+            return invite.to_dict() if invite else None
+
+    def open_invite(self, token: str) -> dict[str, Any] | None:
+        """Candidate-facing lookup; records the first time the link was opened."""
+        with self.session() as s:
+            invite = s.get(Invite, token)
+            if invite is None:
+                return None
+            if invite.opened_at is None and invite.status() == "invited":
+                invite.opened_at = utcnow()
+            return invite.to_dict()
+
+    def claim_invite(self, token: str) -> dict[str, Any]:
+        """Atomically mark an invite as used so it can only be submitted once.
+        Raises InviteUnavailable when it is unknown, revoked, expired or used."""
+        now = utcnow()
+        with self.session() as s:
+            invite = s.get(Invite, token)
+            if invite is None:
+                raise InviteUnavailable("invalid")
+            status = invite.status(now)
+            if status not in ("invited", "started"):
+                raise InviteUnavailable(status)
+            claimed = s.execute(
+                update(Invite).where(Invite.token == token, Invite.completed_at.is_(None),
+                                     Invite.revoked_at.is_(None)).values(completed_at=now)
+            ).rowcount
+            if claimed != 1:
+                raise InviteUnavailable("completed")
+            s.refresh(invite)
+            return invite.to_dict()
+
+    def release_invite(self, token: str) -> None:
+        """Undo claim_invite when saving the submission failed."""
+        with self.session() as s:
+            s.execute(update(Invite).where(Invite.token == token, Invite.assessment_id.is_(None))
+                      .values(completed_at=None))
+
+    def attach_assessment(self, token: str, assessment_id: str) -> None:
+        with self.session() as s:
+            s.execute(update(Invite).where(Invite.token == token).values(assessment_id=assessment_id))
+
+    def revoke_invite(self, token: str) -> dict[str, Any] | None:
+        with self.session() as s:
+            invite = s.get(Invite, token)
+            if invite is None:
+                return None
+            if invite.revoked_at is None and invite.completed_at is None:
+                invite.revoked_at = utcnow()
+            return invite.to_dict()
+
+    def list_invites(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        with self.session() as s:
+            rows = s.scalars(select(Invite).order_by(Invite.created_at.desc()).limit(limit).offset(offset)).all()
+            return [r.to_dict() for r in rows]
 
     def list_assessments(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         with self.session() as s:
