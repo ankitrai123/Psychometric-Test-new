@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Assessment Analytics</title>
+<title>Assessment Admin</title>
 <style>
   :root {
     color-scheme: light;
@@ -129,6 +129,17 @@
   #report-body { padding: 4px 20px 20px; }
   .mini { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 4px 16px; margin-top: 8px; }
   .mini div { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-secondary); border-bottom: 1px solid var(--grid); padding: 3px 0; }
+  .tag.ok { background: #e7f6ea; color: #13751f; }
+  .tag.info { background: #e8f1fd; color: #1d4ed8; }
+  .tag.warn { background: #fff4e0; color: #8a5300; }
+  .sub-h { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 22px 0 8px; font-size: 14px; }
+  .inv-result { margin-top: 16px; padding: 14px; border: 1px solid #b7d3f7; border-radius: 8px; background: rgba(37, 99, 235, .06); }
+  .inv-result-head { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; margin-bottom: 8px; }
+  .inv-result .inline input { width: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  a.btn-link { display: inline-flex; align-items: center; height: 34px; padding: 0 14px; border: 1px solid var(--border);
+               border-radius: 6px; color: var(--text-primary); text-decoration: none; font-weight: 600; white-space: nowrap; }
+  a.btn-link:hover { border-color: #2563eb; color: #2563eb; }
+  button.copied { background: #13751f; }
   #tip { position: fixed; pointer-events: none; background: var(--tip-bg); color: var(--tip-text); font-size: 12px;
          padding: 6px 9px; border-radius: 6px; opacity: 0; transition: opacity .1s; z-index: 10; white-space: nowrap; }
 </style>
@@ -143,6 +154,54 @@
 </header>
 <main>
   <p id="status" class="note">Loading…</p>
+
+  <section class="card" id="invite-card">
+    <div class="card-head">
+      <div>
+        <h2>Invite a candidate</h2>
+        <p class="note" style="margin:0">Creates a personal test link. The candidate's own name and ID appear on their test, the link works once, and their result shows up below and in Candidates.</p>
+      </div>
+      <span class="pill" id="inv-pill">Checking…</span>
+    </div>
+    <form id="invite-form" class="form-grid" autocomplete="off">
+      <label>Full name
+        <input id="inv-name" required maxlength="200" placeholder="e.g. Ananya Sharma" />
+      </label>
+      <label>Email
+        <input id="inv-email" type="email" maxlength="320" placeholder="Optional" />
+      </label>
+      <label>Candidate ID
+        <input id="inv-id" maxlength="64" placeholder="Optional" />
+        <span class="hint">Leave empty to generate one.</span>
+      </label>
+      <label>Role
+        <input id="inv-role" maxlength="200" placeholder="Optional, e.g. Senior Software Engineer" />
+      </label>
+      <label>Link valid for (days)
+        <input id="inv-days" type="number" min="1" max="90" value="7" required />
+      </label>
+      <div class="actions" style="align-self:end">
+        <button type="submit" id="inv-create">Generate test link</button>
+        <span class="note" id="inv-msg" role="status"></span>
+      </div>
+    </form>
+    <div id="inv-result" class="inv-result hidden" aria-live="polite">
+      <div class="inv-result-head"><b id="inv-result-title"></b><span class="hint" id="inv-result-sub"></span></div>
+      <div class="inline">
+        <input id="inv-link" readonly aria-label="Test link" />
+        <button type="button" id="inv-copy">Copy link</button>
+        <a class="btn-link" id="inv-mail" href="#">Email to candidate</a>
+      </div>
+    </div>
+    <h3 class="sub-h">Invitations <button type="button" class="secondary small" id="inv-refresh">Refresh</button></h3>
+    <div class="scroll cand-scroll">
+      <table class="cand">
+        <thead><tr><th>Candidate</th><th>Status</th><th>Created</th><th>Expires</th><th></th></tr></thead>
+        <tbody id="inv-rows"><tr><td colspan="5" class="note">No invitations yet.</td></tr></tbody>
+      </table>
+    </div>
+    <p class="note" id="inv-base"></p>
+  </section>
 
   <section class="card" id="llm-card">
     <div class="card-head">
@@ -503,6 +562,115 @@
   });
   $("cand-refresh").addEventListener("click", () => loadCandidates().catch((err) => alert(err.message)));
 
+  // ---- Candidate invitations -------------------------------------------------
+  const INV_TAGS = { invited: ["", "Invited"], started: ["info", "Started"], completed: ["ok", "Completed"],
+                     expired: ["warn", "Expired"], revoked: ["flag", "Cancelled"] };
+  const fmtDay = (iso) => new Date(iso).toLocaleDateString(undefined, { dateStyle: "medium" });
+  let invites = [];
+
+  function mailtoFor(inv) {
+    const role = inv.role ? ` for the ${inv.role} role` : "";
+    const body = `Hi ${inv.name},\n\nPlease complete your online assessment${role} using your personal link:\n${inv.link}\n\n` +
+      `The link can be used once and is valid until ${fmtDay(inv.expires_at)}. The test takes about 45 minutes; ` +
+      `please use a laptop or desktop with a stable internet connection.\n\nBest regards`;
+    return `mailto:${encodeURIComponent(inv.email || "")}?subject=${encodeURIComponent("Your assessment link")}` +
+           `&body=${encodeURIComponent(body)}`;
+  }
+
+  async function copyText(text, btn) {
+    try { await navigator.clipboard.writeText(text); }
+    catch {
+      const t = document.createElement("textarea"); t.value = text; document.body.appendChild(t);
+      t.select(); document.execCommand("copy"); t.remove();
+    }
+    const label = btn.textContent; btn.textContent = "Copied ✓"; btn.classList.add("copied");
+    setTimeout(() => { btn.textContent = label; btn.classList.remove("copied"); }, 1500);
+  }
+
+  function showCreated(inv) {
+    $("inv-result-title").textContent = `Link ready for ${inv.name}`;
+    $("inv-result-sub").textContent = `${inv.candidate_id} · valid until ${fmtDay(inv.expires_at)} · single use`;
+    $("inv-link").value = inv.link;
+    $("inv-mail").href = mailtoFor(inv);
+    $("inv-mail").style.display = inv.email ? "" : "none";
+    $("inv-result").classList.remove("hidden");
+    $("inv-link").focus(); $("inv-link").select();
+  }
+
+  function renderInvites() {
+    const rows = $("inv-rows");
+    if (!invites.length) { rows.innerHTML = `<tr><td colspan="5" class="note">No invitations yet.</td></tr>`; return; }
+    rows.innerHTML = invites.map((i) => {
+      const [cls, label] = INV_TAGS[i.status] || ["", i.status];
+      const open = i.status === "invited" || i.status === "started";
+      return `<tr>
+        <td><div class="who">${esc(i.name)}</div><div class="sub">${esc(i.candidate_id)}${i.email ? " · " + esc(i.email) : ""}${i.role ? " · " + esc(i.role) : ""}</div></td>
+        <td><span class="tag ${cls}">${label}</span></td>
+        <td class="sub">${esc(fmtDay(i.created_at))}</td>
+        <td class="sub">${esc(fmtDay(i.expires_at))}</td>
+        <td class="acts">
+          ${open ? `<button class="small secondary" data-inv="copy" data-token="${esc(i.token)}">Copy link</button>` : ""}
+          ${open ? `<button class="small secondary danger" data-inv="revoke" data-token="${esc(i.token)}">Cancel link</button>` : ""}
+          ${i.status === "completed" && i.assessment_id ? `<button class="small secondary" data-inv="view" data-id="${esc(i.assessment_id)}">View report</button>` : ""}
+        </td></tr>`;
+    }).join("");
+  }
+
+  async function loadInvites() {
+    const data = await (await api("/api/admin/invites?limit=200")).json();
+    invites = data.invites;
+    const pill = $("inv-pill");
+    pill.className = data.invite_required ? "pill ok" : "pill warn";
+    pill.textContent = data.invite_required ? "Candidates need a personal link" : "Test is also open without a link";
+    $("inv-base").textContent = `Links open ${data.candidate_app_url}`;
+    renderInvites();
+  }
+
+  $("invite-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    busy($("inv-create"), "Generating…", async () => {
+      $("inv-msg").textContent = ""; $("inv-msg").className = "note";
+      const body = { name: $("inv-name").value.trim(), valid_days: Number($("inv-days").value) };
+      for (const [field, id] of [["email", "inv-email"], ["candidate_id", "inv-id"], ["role", "inv-role"]]) {
+        const v = $(id).value.trim(); if (v) body[field] = v;
+      }
+      try {
+        const inv = await (await api("/api/admin/invites", { method: "POST", body: JSON.stringify(body) })).json();
+        showCreated(inv);
+        ["inv-name", "inv-email", "inv-id"].forEach((id) => { $(id).value = ""; });
+        invites = [inv, ...invites]; renderInvites();
+      } catch (err) { $("inv-msg").textContent = err.message; $("inv-msg").className = "note error"; }
+    });
+  });
+
+  $("inv-copy").addEventListener("click", (e) => copyText($("inv-link").value, e.target));
+  $("inv-refresh").addEventListener("click", () => loadInvites().catch((err) => {
+    $("inv-msg").textContent = err.message; $("inv-msg").className = "note error";
+  }));
+
+  $("inv-rows").addEventListener("click", async (e) => {
+    const btn = e.target.closest("button[data-inv]");
+    if (!btn) return;
+    const inv = invites.find((i) => i.token === btn.dataset.token);
+    try {
+      if (btn.dataset.inv === "copy" && inv) {
+        await copyText(inv.link, btn);
+      } else if (btn.dataset.inv === "revoke" && inv) {
+        if (!btn.dataset.armed) {           // two-step confirm without a blocking dialog
+          btn.dataset.armed = "1"; btn.textContent = "Confirm cancel";
+          setTimeout(() => { delete btn.dataset.armed; btn.textContent = "Cancel link"; }, 4000);
+          return;
+        }
+        const updated = await busy(btn, "Cancelling…", async () =>
+          (await api(`/api/admin/invites/${encodeURIComponent(inv.token)}`, { method: "DELETE" })).json());
+        invites = invites.map((i) => (i.token === updated.token ? updated : i)); renderInvites();
+        if ($("inv-link").value === updated.link) $("inv-result").classList.add("hidden");
+      } else if (btn.dataset.inv === "view") {
+        showReport(await (await api(`/api/results/${encodeURIComponent(btn.dataset.id)}`)).json());
+      }
+    } catch (err) { $("inv-msg").textContent = err.message; $("inv-msg").className = "note error"; }
+  });
+
   // ---- Cohort ---------------------------------------------------------------
   $("cohort-run").addEventListener("click", (e) => busy(e.target, "Analysing…", async () => {
     const out = $("cohort-out");
@@ -522,7 +690,7 @@
   async function load() {
     $("key").value = $("key").value || store.get();
     try {
-      await Promise.all([refreshAnalytics(), loadProvider(), loadCandidates()]);
+      await Promise.all([refreshAnalytics(), loadProvider(), loadCandidates(), loadInvites()]);
     } catch (err) {
       $("status").textContent = err.message; $("status").className = "note error";
     }
