@@ -87,6 +87,17 @@ src/
 
 To send candidates' answers to it, set `VITE_ASSESSMENT_API_URL` (see `.env.example`). The completion page then submits once and shows whether the server received the answers. Without it, the frontend runs offline as before.
 
+## Candidate invitations
+
+Admins create a personal test link for each candidate from the **Invite a candidate** card on `/admin` (name, optional email, candidate ID, role and how many days the link stays valid). The link looks like `https://<your-site>/?invite=<token>`:
+
+- The candidate's own name, ID, email and role appear on their test; the registration window runs from when the link was created until it expires.
+- Each link can be submitted once. Expired, cancelled, already-used and mistyped links show a clear message instead of the test.
+- The Invitations table shows Invited, Started, Completed, Expired or Cancelled, with **Copy link**, **Cancel link** and **View report**.
+- Set `REQUIRE_INVITE=true` on the backend so the test can only be taken through a personal link (the site then shows "Personal test link required" without one). Links point to `CANDIDATE_APP_URL` (defaults to the first non-localhost `CORS_ORIGINS` entry).
+
+Invites are stored in the backend database, so on serverless hosting (Vercel) connect a shared Postgres database via `DATABASE_URL`.
+
 ## Not yet included
 
-There is no candidate authentication, document upload or proctoring yet. The branding in `Brand.tsx` is a placeholder.
+There is no document upload or proctoring yet, and invite emails are sent from the admin's own mail app (the dashboard's **Email to candidate** button). The branding in `Brand.tsx` is a placeholder.
