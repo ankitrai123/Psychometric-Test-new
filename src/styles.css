@@ -647,3 +647,10 @@ kbd {
   .tooltip { left: auto; right: -8px; transform: none; }
   .nav-controls { flex: 1 1 100%; flex-wrap: wrap; margin-left: 0; }
 }
+
+/* ---------- Invite link gate ---------- */
+.gate-badge { background: var(--primary-soft); color: var(--primary); }
+.gate-expired { background: var(--warning-soft); color: var(--warning); }
+.gate-invalid, .gate-revoked { background: var(--danger-soft); color: var(--danger); }
+.gate-completed { background: var(--success-soft); color: var(--success); }
+.gate-help { font-size: 0.875rem; margin-top: 8px; }
