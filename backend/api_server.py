@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+import time
 from pathlib import Path
 from typing import Any, Literal
 
@@ -15,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
+import admin_auth
 import exporters
 from config import Settings, settings as default_settings
 from database_models import Assessment, Database, DatabaseCacheStore, InviteUnavailable
@@ -39,6 +41,11 @@ class AssessRequest(BaseModel):
     invite_token: str | None = Field(default=None, max_length=64,
                                      description="Token from the candidate's invite link. When given, the "
                                                  "candidate's identity comes from the invite, not this body.")
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(max_length=200)
+    password: str = Field(max_length=500)
 
 
 class InviteRequest(BaseModel):
@@ -97,8 +104,9 @@ def create_app(cfg: Settings = default_settings, db: Database | None = None,
         raise RuntimeError("invalid configuration: " + "; ".join(problems))
     for p in problems:
         log.warning("config: %s", p)
-    if not cfg.admin_api_key:
-        log.warning("ADMIN_API_KEY not set: results, analytics and exports are unauthenticated (development only)")
+    if not cfg.admin_auth_enabled:
+        log.warning("ADMIN_PASSWORD not set: the admin dashboard, results and exports are unauthenticated "
+                    "(development only)")
 
     db = db or Database(cfg)
     db.create_all()
@@ -166,9 +174,22 @@ def create_app(cfg: Settings = default_settings, db: Database | None = None,
 
     sync_llm()
 
-    def require_admin(x_api_key: str | None = Header(default=None)) -> None:
-        if cfg.admin_api_key and not (x_api_key and secrets.compare_digest(x_api_key, cfg.admin_api_key)):
-            raise HTTPException(status_code=401, detail="missing or invalid X-API-Key")
+    def bearer(authorization: str | None) -> str | None:
+        if authorization and authorization[:7].lower() == "bearer ":
+            return authorization[7:].strip()
+        return None
+
+    def require_admin(x_api_key: str | None = Header(default=None),
+                      authorization: str | None = Header(default=None)) -> None:
+        """Signed-in dashboard session (Authorization: Bearer) or, for scripts, X-API-Key."""
+        if not cfg.admin_auth_enabled:
+            return
+        if cfg.admin_api_key and x_api_key and secrets.compare_digest(x_api_key.encode(), cfg.admin_api_key.encode()):
+            return
+        token = bearer(authorization)
+        if token and admin_auth.verify_token(cfg, token):
+            return
+        raise HTTPException(status_code=401, detail="Please sign in to the admin dashboard.")
 
     def find_assessment(test_id: str) -> Assessment:
         a = db.get_assessment(test_id)
@@ -360,6 +381,27 @@ def create_app(cfg: Settings = default_settings, db: Database | None = None,
             raise HTTPException(status_code=409, detail="no assessments to analyse yet")
         sync_llm()
         return generator.cohort_report(stats)
+
+    # -- Admin sign-in ------------------------------------------------------------
+
+    @app.post("/api/admin/login")
+    def admin_login(body: LoginRequest) -> dict[str, Any]:
+        if not cfg.admin_auth_enabled:
+            return {"auth_required": False, "token": None, "username": None}
+        if not admin_auth.check_credentials(cfg, body.username, body.password):
+            time.sleep(0.5)  # slow down password guessing
+            raise HTTPException(status_code=401, detail="Wrong username or password.")
+        token, expires = admin_auth.issue_token(cfg)
+        return {"auth_required": True, "token": token, "expires_at": expires, "username": cfg.admin_username}
+
+    @app.get("/api/admin/session")
+    def admin_session(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        """Lets the dashboard decide whether to show the sign-in screen."""
+        if not cfg.admin_auth_enabled:
+            return {"auth_required": False, "signed_in": True, "username": None}
+        token = bearer(authorization)
+        user = admin_auth.verify_token(cfg, token) if token else None
+        return {"auth_required": True, "signed_in": bool(user), "username": user}
 
     # -- Candidate invitations --------------------------------------------------
 

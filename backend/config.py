@@ -99,6 +99,11 @@ class Settings:
     dev_key_path: Path = DATA_DIR / ".dev_encryption_key"
     # When set, every endpoint except POST /api/assess requires X-API-Key.
     admin_api_key: str | None = None
+    # Admin dashboard sign-in. Login is on when ADMIN_PASSWORD (or the older
+    # ADMIN_API_KEY) is set; the dashboard then asks for username + password.
+    admin_username: str = "admin"
+    admin_password: str | None = None
+    admin_session_hours: int = 12
     cors_origins: tuple[str, ...] = field(default_factory=lambda: ("http://localhost:5173",))
 
     # --- Candidate invitations ---------------------------------------------
@@ -117,6 +122,14 @@ class Settings:
             return self.candidate_app_url.rstrip("/")
         public = [o for o in self.cors_origins if "localhost" not in o and "127.0.0.1" not in o]
         return (public or list(self.cors_origins) or ["http://localhost:5173"])[0].rstrip("/")
+
+    @property
+    def effective_admin_password(self) -> str | None:
+        return self.admin_password or self.admin_api_key
+
+    @property
+    def admin_auth_enabled(self) -> bool:
+        return bool(self.effective_admin_password)
 
     @property
     def is_production(self) -> bool:
@@ -143,8 +156,8 @@ class Settings:
         if self.is_production:
             if not self.response_encryption_key:
                 problems.append("RESPONSE_ENCRYPTION_KEY is required in production")
-            if not self.admin_api_key:
-                problems.append("ADMIN_API_KEY is required in production")
+            if not self.admin_auth_enabled:
+                problems.append("ADMIN_PASSWORD (or ADMIN_API_KEY) is required in production")
         return problems
 
 
@@ -192,6 +205,9 @@ def load_settings() -> Settings:
         database_url=normalise_database_url(_env("DATABASE_URL", f"sqlite:///{DATA_DIR / 'assessments.db'}") or ""),
         response_encryption_key=_env("RESPONSE_ENCRYPTION_KEY"),
         admin_api_key=_env("ADMIN_API_KEY"),
+        admin_username=(_env("ADMIN_USERNAME", "admin") or "admin").strip(),
+        admin_password=_env("ADMIN_PASSWORD"),
+        admin_session_hours=_env_int("ADMIN_SESSION_HOURS", 12),
         cors_origins=tuple(o.strip() for o in origins.split(",") if o.strip()),
         require_invite=_env_bool("REQUIRE_INVITE", False),
         candidate_app_url=_env("CANDIDATE_APP_URL"),

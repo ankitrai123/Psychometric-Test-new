@@ -554,6 +554,46 @@ def test_require_invite_and_admin_key(cfg):
     assert client.post("/api/assess", json=assess_body(14, invite_token=token)).status_code == 200
 
 
+def test_admin_login_flow(cfg):
+    import admin_auth
+    locked = dataclasses.replace(cfg, admin_username="hr-admin", admin_password="S3cret pass!")
+    client = api_client(locked)
+    assert client.get("/api/admin/session").json() == {"auth_required": True, "signed_in": False, "username": None}
+    assert client.get("/api/analytics").status_code == 401
+    assert client.post("/api/admin/invites", json={"name": "X"}).status_code == 401
+
+    for user, pw in [("hr-admin", "wrong"), ("someone", "S3cret pass!"), ("", "")]:
+        assert client.post("/api/admin/login", json={"username": user, "password": pw}).status_code == 401
+    res = client.post("/api/admin/login", json={"username": " HR-Admin ", "password": "S3cret pass!"})
+    assert res.status_code == 200, res.text
+    token = res.json()["token"]
+    auth = {"Authorization": f"Bearer {token}"}
+    assert client.get("/api/admin/session", headers=auth).json()["signed_in"] is True
+    assert client.get("/api/analytics", headers=auth).status_code == 200
+    assert client.post("/api/admin/invites", json={"name": "Y"}, headers=auth).status_code == 201
+    assert client.get("/admin").status_code == 200  # the page itself loads; its data needs sign-in
+
+    # Tampered, expired and other-password tokens are rejected.
+    payload, sig = token.split(".")
+    assert client.get("/api/analytics", headers={"Authorization": f"Bearer {payload}.{sig[:-2]}xx"}).status_code == 401
+    old, _ = admin_auth.issue_token(locked, now=time.time() - 13 * 3600)
+    assert client.get("/api/analytics", headers={"Authorization": f"Bearer {old}"}).status_code == 401
+    other, _ = admin_auth.issue_token(dataclasses.replace(locked, admin_password="different"))
+    assert client.get("/api/analytics", headers={"Authorization": f"Bearer {other}"}).status_code == 401
+
+
+def test_admin_login_off_and_api_key_fallback(cfg):
+    open_client = api_client(cfg)
+    assert open_client.get("/api/admin/session").json()["auth_required"] is False
+    assert open_client.get("/api/analytics").status_code == 200
+
+    keyed = api_client(dataclasses.replace(cfg, admin_api_key="legacy-key"))
+    # ADMIN_API_KEY alone also works as the dashboard password (username "admin").
+    token = keyed.post("/api/admin/login", json={"username": "admin", "password": "legacy-key"}).json()["token"]
+    assert keyed.get("/api/analytics", headers={"Authorization": f"Bearer {token}"}).status_code == 200
+    assert keyed.get("/api/analytics", headers={"X-API-Key": "legacy-key"}).status_code == 200
+
+
 def test_invite_link_base_url_and_database_url():
     from config import Settings, normalise_database_url
     assert Settings(cors_origins=("http://localhost:5173", "https://app.example.com")).invite_base_url \
