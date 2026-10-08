@@ -9,7 +9,7 @@ export const candidate: CandidateProfile = {
   email: 'candidate@example.com',
   candidateId: 'CND-2026-00457',
   role: 'Senior Software Engineer',
-  organization: 'Acme Corporation',
+  organization: 'Pasona',
 };
 
 const DAY = 24 * 60 * 60 * 1000;
