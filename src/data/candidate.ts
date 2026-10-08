@@ -1,6 +1,8 @@
 import type { CandidateProfile, RequiredDocument } from '../types';
 
-// Placeholder data. Replace with values from your candidate/ATS backend.
+// Placeholder data, used in offline/demo mode. When the candidate opens a
+// personal invite link (?invite=...), applyInvite() replaces these values
+// with the details the admin entered on the dashboard.
 
 export const candidate: CandidateProfile = {
   name: 'Prateek Kumar',
@@ -48,3 +50,32 @@ export const support = {
   email: 'support@example.com',
   phone: '+91 80 0000 0000',
 };
+
+/** Details returned by GET /api/invites/{token}. */
+export interface InviteDetails {
+  candidate_id: string;
+  name: string;
+  email: string | null;
+  role: string | null;
+  status: 'invited' | 'started' | 'completed' | 'expired' | 'revoked';
+  created_at: string;
+  expires_at: string;
+}
+
+/** The invite this browser tab is using, if any. */
+export const inviteState: { token: string | null } = { token: null };
+
+/** Switch the app to the invited candidate. Call before the first render. */
+export function applyInvite(token: string, details: InviteDetails) {
+  inviteState.token = token;
+  candidate.name = details.name;
+  candidate.email = details.email ?? '';
+  candidate.candidateId = details.candidate_id;
+  if (details.role) {
+    candidate.role = details.role;
+    const position = offerOverview.find((item) => item.label === 'Position');
+    if (position) position.value = details.role;
+  }
+  registrationWindow.opens = new Date(details.created_at);
+  registrationWindow.closes = new Date(details.expires_at);
+}
