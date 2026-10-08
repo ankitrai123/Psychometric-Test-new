@@ -150,6 +150,8 @@ kbd {
 }
 
 .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.brand-logo { display: block; height: 30px; width: auto; }
+.brand-logo-compact { height: 24px; }
 .brand-mark { color: var(--navy); display: inline-flex; }
 .brand-name { display: flex; flex-direction: column; font-weight: 700; color: var(--navy); line-height: 1.15; white-space: nowrap; }
 .brand-name small { font-weight: 500; font-size: 0.75rem; color: var(--text-3); }
@@ -641,6 +643,8 @@ kbd {
   .user-chip span:last-child { display: none; }
   .test-header { gap: 8px; }
   .test-header .brand-name { display: none; }
+  .brand-logo { height: 24px; }
+  .brand-logo-compact { height: 18px; }
   .question-panel, .response-panel { padding: 18px; }
   .stepper { flex-wrap: wrap; }
   .attempted { flex-basis: 100%; margin-right: 0; }
