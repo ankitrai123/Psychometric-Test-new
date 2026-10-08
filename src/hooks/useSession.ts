@@ -1,4 +1,5 @@
 import { useEffect, useReducer, useState } from 'react';
+import { inviteState } from '../data/candidate';
 import { test } from '../data/test';
 import type { Stage } from '../types';
 
@@ -32,7 +33,13 @@ export type SessionAction =
   | { type: 'serverAccepted'; assessmentId: string }
   | { type: 'reset' };
 
-const STORAGE_KEY = `psychometric:${test.testId}:session`;
+/** One saved session per invite, so several candidates (or an admin testing
+ *  links) can use the same browser without overwriting each other. */
+function storageKey(): string {
+  return inviteState.token
+    ? `psychometric:${test.testId}:invite:${inviteState.token}`
+    : `psychometric:${test.testId}:session`;
+}
 
 const initialState: SessionState = {
   stage: 'registration',
@@ -97,12 +104,17 @@ function reducer(state: SessionState, action: SessionAction): SessionState {
 
 function load(): SessionState {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(storageKey());
     if (raw) return { ...initialState, ...JSON.parse(raw) };
   } catch {
     // Storage unavailable or corrupt: start fresh.
   }
   return initialState;
+}
+
+/** Stage of the session saved in this browser, without starting one. */
+export function savedStage(): Stage {
+  return load().stage;
 }
 
 /**
@@ -115,7 +127,7 @@ export function useSession() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      localStorage.setItem(storageKey(), JSON.stringify(state));
       setLastSavedAt(Date.now());
     } catch {
       // Quota exceeded or storage blocked; state still lives in memory.
